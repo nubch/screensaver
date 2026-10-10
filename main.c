@@ -19,6 +19,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <errno.h>
 
 #define W 320
 #define H 240
@@ -66,6 +67,11 @@ static char gateway_str[48]="0.0.0.0";
 static uint32_t lastIpPoll=0;
 static uint32_t connected=0;
 static uint32_t lastReceive=0;
+static char netStatus[64]="BOOT";
+static int netError=0;
+static int socketError=0;
+static int netFallbackUsed=0;
+static char tcpStage[24]="NOT STARTED";
 
 static uint32_t random32(void) {
   rngState^=rngState<<13;
@@ -296,6 +302,14 @@ static void drawHUD(uint32_t now){
  if(listener<0)smallText(185,29,"TCP ERROR",COLOR(255,112,126),1);
  else if(strcmp(ip_str,"0.0.0.0")==0)smallText(178,29,"WAITING DHCP",COLOR(255,190,93),1);
  else smallText(229,29,"ONLINE",LIME,1);
+ if(listener<0 || strcmp(ip_str,"0.0.0.0")==0) {
+   char diag[78];
+   rect(4,183,312,42,COLOR(9,17,28));
+   smallText(10,187,netStatus,COLOR(255,194,112),1);
+   snprintf(diag,sizeof(diag),"NET:%d SOCK:%d STAGE:%s",netError,socketError,tcpStage);
+   smallText(10,199,diag,COLOR(255,132,138),1);
+   if(g_pnetif)smallText(10,211,netif_is_link_up(g_pnetif)?"LINK: UP":"LINK: DOWN",PALE,1);
+ }
  if(received==0){
    smallText(63,107,"AWAITING MESSAGES",COLOR(108,144,150),1);
    smallText(80,119,"TCP PORT 4242",COLOR(73,111,119),1);
@@ -355,19 +369,27 @@ static void acceptChar(Client *c,unsigned char ch){
 static int setupServer(void){
  struct sockaddr_in addr;
  int yes=1;
+ strcpy(tcpStage,"SOCKET");
  listener=lwip_socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
- if(listener<0){debugPrint("socket() failed\n");return -1;}
+ if(listener<0){socketError=errno;debugPrint("socket() failed errno=%d\n",socketError);return -1;}
  lwip_setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
  memset(&addr,0,sizeof(addr));
  addr.sin_family=AF_INET;
  addr.sin_port=htons(TCP_PORT);
  addr.sin_addr.s_addr=htonl(INADDR_ANY);
+ strcpy(tcpStage,"BIND");
  if(lwip_bind(listener,(struct sockaddr *)&addr,sizeof(addr))<0){
-   debugPrint("bind(%d) failed\n",TCP_PORT);lwip_close(listener);listener=-1;return -1;
+   socketError=errno;
+   debugPrint("bind(%d) failed errno=%d\n",TCP_PORT,socketError);
+   lwip_close(listener);listener=-1;return -1;
  }
+ strcpy(tcpStage,"LISTEN");
  if(lwip_listen(listener,MAX_CLIENTS)<0){
-   debugPrint("listen() failed\n");lwip_close(listener);listener=-1;return -1;
+   socketError=errno;
+   debugPrint("listen() failed errno=%d\n",socketError);
+   lwip_close(listener);listener=-1;return -1;
  }
+ strcpy(tcpStage,"OK");
  debugPrint("Listening on TCP %d\n",TCP_PORT);
  return 0;
 }
@@ -422,11 +444,31 @@ int main(int argc,char **argv){
  for(int i=0;i<MAX_CLIENTS;i++)clients[i].fd=-1;
  XVideoSetMode(640,480,32,REFRESH_DEFAULT);
  debugPrint("XBOX TCP SCREENSAVER - boot\n");
+ /* nxNetInit(NULL) may return -1 before TCP/IP initialization
+  * when a modded Xbox has no valid network config sector.
+  * Retry once with explicitly selected DHCP. Do not retry after -2,
+  * because that indicates DHCP timeout after TCP/IP initialization. */
  net_result=nxNetInit(NULL);
- if(net_result<0)debugPrint("ERROR: nxNetInit returned %d\n",net_result);
- else{
-   debugPrint("Network initialized, waiting for DHCP\n");
+ if(net_result==-1){
+   nx_net_parameters_t params;
+   memset(&params,0,sizeof(params));
+   params.ipv4_mode=NX_NET_DHCP;
+   params.ipv6_mode=NX_NET_AUTO;
+   netFallbackUsed=1;
+   debugPrint("No network config; retry explicit DHCP\n");
+   net_result=nxNetInit(&params);
+ }
+ netError=net_result;
+ if(net_result==0){
+   strcpy(netStatus,netFallbackUsed?"NET: DHCP FALLBACK OK":"NET: CONFIG OK");
    setupServer();
+ } else if(net_result==-2){
+   strcpy(netStatus,"DHCP TIMEOUT - CHECK ROUTER");
+   debugPrint("DHCP timeout (-2), network stack initialized\n");
+   if(g_pnetif)setupServer();
+ } else {
+   strcpy(netStatus,"NETWORK INIT FAILED");
+   debugPrint("Network initialization failed %d\n",net_result);
  }
  if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_JOYSTICK)!=0){
    debugPrint("SDL_Init: %s\n",SDL_GetError());return 1;
