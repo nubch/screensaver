@@ -8,6 +8,7 @@
 #include <hal/video.h>
 #include <hal/debug.h>
 #include <nxdk/net.h>
+#include <nxdk/configsector.h>
 #include <lwip/tcpip.h>
 #include <lwip/netif.h>
 #include <lwip/ip4_addr.h>
@@ -444,19 +445,24 @@ int main(int argc,char **argv){
  for(int i=0;i<MAX_CLIENTS;i++)clients[i].fd=-1;
  XVideoSetMode(640,480,32,REFRESH_DEFAULT);
  debugPrint("XBOX TCP SCREENSAVER - boot\n");
- /* nxNetInit(NULL) may return -1 before TCP/IP initialization
-  * when a modded Xbox has no valid network config sector.
-  * Retry once with explicitly selected DHCP. Do not retry after -2,
-  * because that indicates DHCP timeout after TCP/IP initialization. */
- net_result=nxNetInit(NULL);
- if(net_result==-1){
-   nx_net_parameters_t params;
-   memset(&params,0,sizeof(params));
-   params.ipv4_mode=NX_NET_DHCP;
-   params.ipv6_mode=NX_NET_AUTO;
-   netFallbackUsed=1;
-   debugPrint("No network config; retry explicit DHCP\n");
-   net_result=nxNetInit(&params);
+ /* Preflight configuration read *before* initializing the network stack.
+  * nxNetInit(NULL) returns -1 for BOTH missing config and a later NIC
+  * initialization failure: blindly retrying -1 could double-initialize
+  * lwIP.  We therefore choose AUTO or DHCP exactly once. */
+ {
+   nxdk_network_config_sector_t cfg;
+   if(nxLoadNetworkConfig(&cfg)){
+     netFallbackUsed=0;
+     net_result=nxNetInit(NULL);
+   }else{
+     nx_net_parameters_t params;
+     memset(&params,0,sizeof(params));
+     params.ipv4_mode=NX_NET_DHCP;
+     params.ipv6_mode=NX_NET_AUTO;
+     netFallbackUsed=1;
+     debugPrint("Config absent: initializing with explicit DHCP\n");
+     net_result=nxNetInit(&params);
+   }
  }
  netError=net_result;
  if(net_result==0){
