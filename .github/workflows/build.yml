@@ -1,0 +1,27 @@
+name: Build Original Xbox Screensaver
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm make cmake bison flex build-essential git
+      - name: Checkout nxdk SDK
+        run: git clone --recursive --depth 1 https://github.com/XboxDev/nxdk.git ../nxdk
+      - name: Build XBE
+        run: |
+          eval "$(../nxdk/bin/activate -s)"
+          make
+          test -s bin/default.xbe
+      - name: Publish compiled Xbox executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: screensaver-xbe
+          path: bin/default.xbe
+          if-no-files-found: error
